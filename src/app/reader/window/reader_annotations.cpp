@@ -1,3 +1,6 @@
+#include "platform/api/stock_notebook.h"
+#include <QFileInfo>
+#include <QUrl>
 #include "ui/controls/highlight_palette.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/text.h"
@@ -1694,6 +1697,10 @@ void Reader::openNotebook(const QString &id)
 {
     if (notebookFolder.isEmpty())
         return;
+    if (useStockNotebooks()) {
+        openStockNotebook(id);
+        return;
+    }
     if (notebook)
         delete notebook.data();
     QString excerpt;
@@ -1723,10 +1730,11 @@ void Reader::openNotebook(const QString &id)
 
 bool Reader::openLinkedNotebook(QPoint bodyPoint)
 {
-    if (notebookLinks.isEmpty() || notebookFolder.isEmpty())
+    if ((notebookLinks.isEmpty() && stockLinks.places.isEmpty()) || notebookFolder.isEmpty())
         return false;
     for (const auto &group : savedHighlightGroups) {
-        if (!notebookLinks.contains(group.first))
+        if (useStockNotebooks() ? !stockLinks.places.contains(group.first)
+                                : !notebookLinks.contains(group.first))
             continue;
         for (const auto &rect : group.second)
             if (rect.contains(bodyPoint)) {
@@ -1735,6 +1743,91 @@ bool Reader::openLinkedNotebook(QPoint bodyPoint)
             }
     }
     return false;
+}
+
+bool Reader::useStockNotebooks() const
+{
+    return kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
+}
+
+void Reader::saveStockLinks()
+{
+    const auto links = stockLinks;
+    const auto folder = notebookFolder;
+    kobalt::storage::notebook::writer().post(
+            [links, folder] { return kobalt::storage::notebook::writeStockLinks(folder, links); },
+            {});
+}
+
+void Reader::chooseStockNotebook(std::function<void()> chosen)
+{
+    if (notebookPicker)
+        delete notebookPicker.data();
+    annotationPopover->hide();
+    const auto root = kobalt::platform::stockNotebooks().root;
+    QString current;
+    if (stockLinks.notebook.startsWith("file://"))
+        current = QUrl(stockLinks.notebook).toLocalFile();
+    notebookPicker = new kobalt::NotebookPicker(
+            this, root, kobalt::storage::notebook::findStockNotebooks(root), current);
+    notebookPicker->finished = [this, chosen](const QString &file) {
+        if (notebookPicker) {
+            notebookPicker->hide();
+            notebookPicker->deleteLater();
+            notebookPicker.clear();
+        }
+        refresh();
+        if (file.isEmpty())
+            return;
+        const auto id = QUrl::fromLocalFile(file).toString();
+        if (id != stockLinks.notebook) {
+            // Places belong to one notebook.
+            stockLinks.notebook = id;
+            stockLinks.places.clear();
+            stockLinks.pending.clear();
+        }
+        saveStockLinks();
+        if (chosen)
+            chosen();
+    };
+}
+
+void Reader::openStockNotebook(const QString &id)
+{
+    if (stockLinks.notebook.isEmpty()
+        || !QFileInfo::exists(QUrl(stockLinks.notebook).toLocalFile())) {
+        chooseStockNotebook([this, id] { openStockNotebook(id); });
+        return;
+    }
+    kobalt::platform::StockNotebookSpot spot;
+    if (stockLinks.places.contains(id)) {
+        const auto place = stockLinks.places.value(id);
+        spot.part = place.part;
+        spot.offset = QPoint(place.x, place.y);
+        stockLinks.pending.clear();
+    } else {
+        // A new link: the place where the notebook is left becomes this
+        // highlight's place when the book opens again.
+        stockLinks.pending = id;
+    }
+    saveStockLinks();
+    annotationPopover->hide();
+    const auto notebookId = stockLinks.notebook;
+    // Nickel's notebook opens once the reader has closed and saved.
+    QPointer<Reader> guard(this);
+    auto *wait = new QTimer(qApp);
+    auto attempts = std::make_shared<int>(0);
+    wait->setInterval(100);
+    QObject::connect(wait, &QTimer::timeout, wait, [guard, wait, attempts, notebookId, spot] {
+        if (guard && guard->isVisible() && ++*attempts < 150)
+            return;
+        wait->stop();
+        wait->deleteLater();
+        if (!guard || !guard->isVisible())
+            kobalt::platform::stockNotebooks().open(notebookId, spot);
+    });
+    close();
+    wait->start();
 }
 
 void Reader::showAnnotationMatches(QVector<QString> ids, QRect anchor, int listPage)

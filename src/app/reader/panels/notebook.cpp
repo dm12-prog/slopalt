@@ -29,12 +29,9 @@ constexpr int autosaveMs = 4000;
 constexpr int maxPages = storage::notebook::maxPages;
 using storage::notebook::pageFile;
 
-// Shared by every notebook, and never destroyed, so a save posted just before
-// the notebook closes still finishes.
 storage::RecordWriter &pageWriter()
 {
-    static auto *writer = new storage::RecordWriter(storage::RecordWriter::Delivery::All);
-    return *writer;
+    return storage::notebook::writer();
 }
 
 struct Contact
@@ -88,7 +85,8 @@ Notebook::Notebook(QWidget *parent, const QString &folder, const QString &highli
     if (!highlight_.isEmpty()) {
         // A highlight without a page gets a new page after the last one. It
         // is linked when something is drawn on it.
-        first = links_.value(highlight_, qMin(pages_ + 1, maxPages));
+        const int linked = links_.value(highlight_, -1);
+        first = linked >= 1 ? linked : qMin(pages_ + 1, maxPages);
     }
     fastEnd_.setSingleShot(true);
     fastEnd_.setInterval(fastLingerMs);

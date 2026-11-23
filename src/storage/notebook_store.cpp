@@ -1,5 +1,7 @@
 #include "notebook_store.h"
+#include "record_writer.h"
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -66,5 +68,73 @@ bool writeLinks(const QString &folder, const QHash<QString, int> &links)
     if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
         return false;
     return out.commit();
+}
+
+StockLinks readStockLinks(const QString &folder)
+{
+    StockLinks links;
+    QFile file(folder + "/stock.json");
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maxLinksBytes)
+        return links;
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    links.notebook = object.value("notebook").toString();
+    links.pending = object.value("pending").toString();
+    const auto places = object.value("places").toObject();
+    for (auto it = places.begin(); it != places.end(); ++it) {
+        const auto place = it.value().toObject();
+        StockPlace value;
+        value.part = place.value("part").toInt(-1);
+        value.x = place.value("x").toInt();
+        value.y = place.value("y").toInt();
+        if (value.part >= 0)
+            links.places.insert(it.key(), value);
+    }
+    return links;
+}
+
+bool writeStockLinks(const QString &folder, const StockLinks &links)
+{
+    QJsonObject places;
+    for (auto it = links.places.begin(); it != links.places.end(); ++it) {
+        QJsonObject place;
+        place.insert("part", it.value().part);
+        place.insert("x", it.value().x);
+        place.insert("y", it.value().y);
+        places.insert(it.key(), place);
+    }
+    QJsonObject object;
+    object.insert("notebook", links.notebook);
+    if (!links.pending.isEmpty())
+        object.insert("pending", links.pending);
+    object.insert("places", places);
+    const QByteArray data = QJsonDocument(object).toJson();
+    if (!QDir().mkpath(folder))
+        return false;
+    QSaveFile out(folder + "/stock.json");
+    if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
+        return false;
+    return out.commit();
+}
+
+QStringList findStockNotebooks(const QString &root)
+{
+    QStringList found;
+    const QString base = QDir(root).absolutePath();
+    QDirIterator it(base, QStringList() << "*.nebo", QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext() && found.size() < 500) {
+        const QString path = it.next();
+        const QString relative = path.mid(base.size() + 1);
+        if (relative.count('/') > 3 || relative.startsWith('.') || relative.contains("/."))
+            continue;
+        found.append(path);
+    }
+    found.sort(Qt::CaseInsensitive);
+    return found;
+}
+
+RecordWriter &writer()
+{
+    static auto *shared = new RecordWriter(RecordWriter::Delivery::All);
+    return *shared;
 }
 } // namespace kobalt::storage::notebook

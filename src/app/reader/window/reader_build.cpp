@@ -1,3 +1,4 @@
+#include "platform/api/stock_notebook.h"
 #include <algorithm>
 #include "render/page_content.h"
 #include "ui/controls/text.h"
@@ -278,6 +279,20 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
         notebookFolder = key.isEmpty() ? QString() : book->paths().directory + "/notebooks/" + key;
         notebookLinks = notebookFolder.isEmpty() ? QHash<QString, int>()
                                                  : kobalt::Notebook::readLinks(notebookFolder);
+        if (useStockNotebooks()) {
+            stockLinks = kobalt::storage::notebook::readStockLinks(notebookFolder);
+            // The highlight that opened the notebook last time links to the
+            // place where the notebook was left.
+            if (!stockLinks.pending.isEmpty() && !stockLinks.notebook.isEmpty()) {
+                const auto spot =
+                        kobalt::platform::stockNotebooks().spot(stockLinks.notebook);
+                if (spot.valid())
+                    stockLinks.places.insert(stockLinks.pending,
+                                             { spot.part, spot.offset.x(), spot.offset.y() });
+                stockLinks.pending.clear();
+                saveStockLinks();
+            }
+        }
     }
     highlights->changed = [this] {
         syncMarkupRequest();

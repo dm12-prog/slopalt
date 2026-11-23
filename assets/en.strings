@@ -1599,6 +1599,8 @@
 "notebook.undo" = "Undo";
 "notebook.clear" = "Clear";
 "notebook.page" = "Page %1 of %2";
+"notebook.choose_stock" = "Choose this book’s notebook";
+"notebook.none_stock" = "No notebooks yet. Create one in My Notebooks, named after this book, then try again.";
 "annotations.apply_changes" = "Apply changes";
 "annotations.end_here" = "Highlight to here";
 "annotations.export" = "Export all annotations";

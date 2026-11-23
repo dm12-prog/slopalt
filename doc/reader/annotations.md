@@ -190,3 +190,9 @@
 - A page that opened for a highlight without one is linked when something is drawn on it. The highlight's passage appears above its page, on screen only, as does the 5 mm dot grid.
 - Pages are saved on the writer thread 4 seconds after the last stroke, on page changes and on Done. They live in `.adds/kobalt/notebooks/<book folder>/` as `page-001.png` and on, with transparent paper, and `links.json` maps highlight IDs to page numbers. The book folder name matches the annotations folder.
 - Deleting a highlight keeps its page.
+
+### Kobo notebooks (firmware 4)
+
+- On firmware 4, Notebook opens the book's notebook in the Kobo's own notebook app instead of the page above. The first time, a list of the notebooks in My Notebooks asks which one belongs to the book; the choice is kept in `stock.json` in the book's notebook folder. A notebook that no longer exists asks again.
+- Kobalt closes the book and Nickel opens the notebook. Nickel saves where each notebook was left (its page and scroll offset) in `Kobo eReader.conf`, group `IInkSettings`.
+- A highlight's first Notebook tap opens the notebook where it was last left. The next time the book opens, the place where the notebook was left becomes that highlight's place. Later taps on the highlight, or Notebook in its actions, restore that page and scroll offset before the notebook opens.
