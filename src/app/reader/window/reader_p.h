@@ -38,6 +38,7 @@
 #include "app/reader/settings/acknowledgments.h"
 #include "app/reader/panels/light_panel.h"
 #include "app/reader/panels/bookmark_list.h"
+#include "app/reader/panels/notebook.h"
 #include "app/reader/panels/note_editor.h"
 #include "app/reader/panels/dictionary_panel.h"
 #include "app/reader/panels/link_panel.h"
@@ -254,6 +255,14 @@ private:
     // Which presses the open selection menu passes on to the handles.
     void syncPopoverExclusions();
     QPointer<kobalt::NoteEditor> noteEditor;
+    // The handwritten notebook page of a highlight; see panels/notebook.h.
+    void openNotebook(const QString &id);
+    // Opens the notebook page of the saved highlight under a tap on the page
+    // body, if it has one.
+    bool openLinkedNotebook(QPoint bodyPoint);
+    QPointer<kobalt::Notebook> notebook;
+    QString notebookFolder;
+    QHash<QString, int> notebookLinks;
     void showSavedAnnotation(const QString &id, QRect anchor, bool navigate = false);
     void showAnnotationMatches(QVector<QString> ids, QRect anchor, int page = 0);
     void removeAnnotation(const QString &id);
@@ -292,6 +301,8 @@ private:
     QRect annotationActionAnchor;
     quint64 savedHighlightEpoch = 0;
     QVector<QRect> savedHighlightRects;
+    // The saved highlights on the current page and their rectangles.
+    QVector<QPair<QString, QVector<QRect>>> savedHighlightGroups;
 
     // One press that selects text or moves a selection handle.
     struct AnnotationDrag

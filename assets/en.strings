@@ -1592,6 +1592,13 @@
 "annotations.ready" = "Drag handles to adjust. Tap selection to choose a mark.";
 "annotations.highlight_word" = "Highlight word";
 "annotations.mark_text" = "Mark text";
+"annotations.notebook" = "Notebook";
+"notebook.done" = "Done";
+"notebook.pen" = "Pen";
+"notebook.eraser" = "Eraser";
+"notebook.undo" = "Undo";
+"notebook.clear" = "Clear";
+"notebook.page" = "Page %1 of %2";
 "annotations.apply_changes" = "Apply changes";
 "annotations.end_here" = "Highlight to here";
 "annotations.export" = "Export all annotations";

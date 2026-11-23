@@ -968,6 +968,23 @@ void Reader::showAnnotationActions()
                              });
                          } });
     }
+    if (annotationDraft->editingId().isEmpty() && !notebookFolder.isEmpty()) {
+        // Notebook saves the highlight first, then opens its notebook page.
+        actions.append({ "rrAnnotationNotebook", ui::ControlIcon::Annotate,
+                         strings::get("annotations.notebook"), [this] {
+                             QSet<QString> before;
+                             for (const auto &item : highlights->highlights())
+                                 before.insert(item.id);
+                             prepareAnnotation(false, [this, before] {
+                                 syncAnnotations();
+                                 for (const auto &item : highlights->highlights())
+                                     if (!before.contains(item.id)) {
+                                         openNotebook(item.id);
+                                         return;
+                                     }
+                             });
+                         } });
+    }
     if (!annotationDraft->editingId().isEmpty()) {
         // Adjusting a saved highlight: the note action applies the new range,
         // then opens the note, so the order matches a new selection.
@@ -1362,11 +1379,12 @@ void Reader::syncAnnotations()
     }
     updateAnnotationRects(showActions);
     savedHighlightRects.clear();
+    savedHighlightGroups.clear();
     annotationDraft->hideRectangles();
     page->annotate({}, {});
     const auto epoch = ++savedHighlightEpoch;
     QVector<QPair<QString, QString>> ranges;
-    QVector<QString> colors, styles;
+    QVector<QString> colors, styles, ids;
     const auto &items = highlights->highlights();
     const auto locations = highlights->locations();
     for (int i = 0; i < items.size(); ++i) {
@@ -1375,6 +1393,7 @@ void Reader::syncAnnotations()
         if (items[i].id != annotationDraft->editingId() && start >= 0 && start <= session->page()
             && end >= session->page()) {
             ranges.append(qMakePair(items[i].start, items[i].end));
+            ids.append(items[i].id);
             colors.append(colorAnnotations() ? highlightDisplayColor(items[i].color)
                                              : QString("gray"));
             styles.append(highlightDisplayStyle(items[i].style));
@@ -1385,7 +1404,7 @@ void Reader::syncAnnotations()
     }
     QPointer<Reader> guard(this);
     session->rangeRectGroups(ranges,
-                             [guard, epoch, colors, styles](QVector<QVector<QRect>> groups) {
+                             [guard, epoch, colors, styles, ids](QVector<QVector<QRect>> groups) {
                                  if (!guard || guard->savedHighlightEpoch != epoch) {
                                      return;
                                  }
@@ -1397,6 +1416,9 @@ void Reader::syncAnnotations()
                                                      styles.value(i, "shaded") });
                                  }
                                  guard->savedHighlightRects = rects;
+                                 guard->savedHighlightGroups.clear();
+                                 for (int i = 0; i < groups.size() && i < ids.size(); ++i)
+                                     guard->savedHighlightGroups.append({ ids[i], groups[i] });
                                  guard->paintAnnotationDraft();
                                  guard->page->setSavedHighlights(tinted);
                              });
@@ -1533,6 +1555,8 @@ void Reader::showSavedAnnotationAt(const QString &id, QRect anchor, bool navigat
     annotationActionsFor(
             { { "rrAnnotationEditNote", ui::ControlIcon::Note,
                 strings::get("annotations.edit_note"), [this, id] { openNoteEditor(id); } },
+              { "rrAnnotationNotebook", ui::ControlIcon::Annotate,
+                strings::get("annotations.notebook"), [this, id] { openNotebook(id); } },
               { "rrAnnotationAppearance", ui::ControlIcon::Styling,
                 strings::get(colorAnnotations() ? "annotations.color" : "annotations.style"),
                 [this, id, anchor, navigate] { showSavedAppearance(id, anchor, navigate, true); } },
@@ -1595,6 +1619,10 @@ void Reader::showSavedAppearance(const QString &id, QRect anchor, bool navigate,
         actions.append({ "rrAnnotationAddNote", ui::ControlIcon::Note,
                          strings::get("annotations.add_note"),
                          [this, id] { openNoteEditor(id); } });
+        if (!notebookFolder.isEmpty())
+            actions.append({ "rrAnnotationNotebook", ui::ControlIcon::Annotate,
+                             strings::get("annotations.notebook"),
+                             [this, id] { openNotebook(id); } });
         actions.append({ "rrAnnotationEdit", ui::ControlIcon::EditHighlight,
                          strings::get("annotations.edit"), [this, id, navigate, anchor] {
                              annotationPopover->hide();
@@ -1660,6 +1688,53 @@ void Reader::openNoteEditor(const QString &id)
         syncAnnotations();
         settleQuickAnnotations();
     };
+}
+
+void Reader::openNotebook(const QString &id)
+{
+    if (notebookFolder.isEmpty())
+        return;
+    if (notebook)
+        delete notebook.data();
+    QString excerpt;
+    Highlight detail;
+    if (!id.isEmpty() && highlights->detail(id, &detail))
+        excerpt = detail.text;
+    annotationPopover->hide();
+    QPointer<Reader> guard(this);
+    notebook = new kobalt::Notebook(this, notebookFolder, id, excerpt, [guard](bool fast) {
+        if (guard)
+            guard->setAnnotationDragRefresh(fast);
+    });
+    notebook->closed = [this] {
+        if (!notebook)
+            return;
+        notebookLinks = notebook->links();
+        notebook->hide();
+        notebook->deleteLater();
+        notebook.clear();
+        setAnnotationDragRefresh(false);
+        annotationFrame.clear();
+        syncAnnotations();
+        settleQuickAnnotations();
+        refresh();
+    };
+}
+
+bool Reader::openLinkedNotebook(QPoint bodyPoint)
+{
+    if (notebookLinks.isEmpty() || notebookFolder.isEmpty())
+        return false;
+    for (const auto &group : savedHighlightGroups) {
+        if (!notebookLinks.contains(group.first))
+            continue;
+        for (const auto &rect : group.second)
+            if (rect.contains(bodyPoint)) {
+                openNotebook(group.first);
+                return true;
+            }
+    }
+    return false;
 }
 
 void Reader::showAnnotationMatches(QVector<QString> ids, QRect anchor, int listPage)

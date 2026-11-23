@@ -1,0 +1,40 @@
+# Fork build: the Kobo firmware 4 (Qt5) package only, without the release
+# pipeline's validation and native tests. Runs on pushes to feature branches
+# and by hand.
+name: Fork Kobo build
+
+on:
+  push:
+    branches: ['notebook-*', 'claude/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-kobo-qt5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Cache compiled dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/dependency-cache
+          key: fork-deps-qt5-${{ hashFiles('platforms/sdk-image.sh', 'dependencies/**/*', 'platforms/shared-inputs.cmake', 'platforms/kobo/CMakeLists.txt', 'platforms/kobo/CMakePresets.json', 'platforms/kobo/build.sh', 'platforms/kobo/toolchains/*.cmake') }}
+      - name: Build the Qt5 package
+        run: |
+          image=$(sh platforms/sdk-image.sh qt5)
+          docker pull "$image"
+          KOBALT_VERBOSE_DIAGNOSTICS=ON bash platforms/kobo/build.sh qt5
+          mkdir -p build/release
+          cp build/kobo-qt5/Kobalt-qt5*.zip build/release/
+          sha256sum build/release/* > build/release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kobalt-notebook-qt5
+          path: build/release/*
+          if-no-files-found: error

@@ -273,6 +273,12 @@ Reader::Reader(std::unique_ptr<kobalt::ReadingBook> openedBook,
     highlights = std::make_unique<kobalt::HighlightSession>(
             *session, markLayout, book->paths().annotations(), book->identity(),
             book->fingerprint(), session->title(), book->paths().database());
+    {
+        const auto key = kobalt::BookmarkStore::bookKey(book->identity(), book->fingerprint());
+        notebookFolder = key.isEmpty() ? QString() : book->paths().directory + "/notebooks/" + key;
+        notebookLinks = notebookFolder.isEmpty() ? QHash<QString, int>()
+                                                 : kobalt::Notebook::readLinks(notebookFolder);
+    }
     highlights->changed = [this] {
         syncMarkupRequest();
         annotationFrame.clear();
@@ -2384,6 +2390,10 @@ void Reader::connectPageInput()
             }
             return;
         }
+        // A tap on a highlight with a notebook page opens that page.
+        if (!annotationMode && point.y() >= page->topHeight()
+            && point.y() < page->height() - page->bottomHeight() && openLinkedNotebook(bodyPoint))
+            return;
         // Enabled links win when their text overlaps the bookmark shortcut.
         if (!annotationMode && point.y() >= page->topHeight()
             && point.y() < page->height() - page->bottomHeight() && openLink(bodyPoint, true))

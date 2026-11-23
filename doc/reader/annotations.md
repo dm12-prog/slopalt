@@ -180,3 +180,13 @@
 - Timestamps include the time; HTML uses the browser’s locale and timezone, and Markdown uses UTC. Exports do not include page numbers.
 - The checked Show annotation styling option below search hides or restores marker fills and underlines.
   - It keeps passages, notes and the embedded font visible, and applies to printing.
+
+## Notebook pages (fork)
+
+- Every highlight can have a handwritten notebook page. Choose Notebook in the selection menu of a new highlight, or in the actions of a saved one. A new highlight is saved first.
+- In ordinary reading, a short tap on a highlight that has a notebook page opens that page. Highlights without a page keep the usual tap behavior.
+- The notebook covers the reader. Its toolbar has Done, previous and next page, the page number, Pen or Eraser, Undo and Clear. The page buttons also turn notebook pages. Clear can be undone.
+- Strokes use the direct waveform while the pen moves, like a selection drag, and one text-waveform cleanup about 1.5 seconds after the pen lifts. The line is smoothed with a low-pass filter and quadratic curves between midpoints. Real pen pressure, when the driver reports it, varies the width. Only the first contact draws; a second finger or palm is ignored.
+- A page that opened for a highlight without one is linked when something is drawn on it. The highlight's passage appears above its page, on screen only, as does the 5 mm dot grid.
+- Pages are saved on the writer thread 4 seconds after the last stroke, on page changes and on Done. They live in `.adds/kobalt/notebooks/<book folder>/` as `page-001.png` and on, with transparent paper, and `links.json` maps highlight IDs to page numbers. The book folder name matches the annotations folder.
+- Deleting a highlight keeps its page.

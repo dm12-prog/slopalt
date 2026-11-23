@@ -1355,6 +1355,13 @@ bool Reader::eventFilter(QObject *watched, QEvent *event)
         const int direction = services.pageButtonDirection(key);
         if (direction) {
             // Consume both events before a sheet's input barrier handles them.
+            if (type == QEvent::KeyPress && notebook && notebook->isVisible()) {
+                // The page buttons turn the notebook's pages while it is open.
+                if (!key->isAutoRepeat())
+                    notebook->turnPage(direction);
+                event->accept();
+                return true;
+            }
             if (type == QEvent::KeyPress) {
                 if (!closing && !book->deviceTransition() && services.remoteKeyActivity)
                     services.remoteKeyActivity(this, key);
