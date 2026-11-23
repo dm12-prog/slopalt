@@ -1748,10 +1748,9 @@ bool Reader::openLinkedNotebook(QPoint bodyPoint)
 
 bool Reader::useStockNotebooks() const
 {
-    // The host's pen layer inside the reader comes first: its notebook stays
-    // with the book and closes back onto the page.
-    return !kobalt::platform::nativeInk().available()
-            && kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
+    // The host's own notebook app comes first: it has the host's fast pen,
+    // tools and files. The book stays open under it.
+    return kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
 }
 
 void Reader::saveStockLinks()
@@ -1816,22 +1815,32 @@ void Reader::openStockNotebook(const QString &id)
     }
     saveStockLinks();
     annotationPopover->hide();
-    const auto notebookId = stockLinks.notebook;
-    // Nickel's notebook opens once the reader has closed and saved.
+    // The book stays open under the notebook. When the notebook closes, the
+    // place it was left at becomes a new link's place, and the page returns.
     QPointer<Reader> guard(this);
-    auto *wait = new QTimer(qApp);
-    auto attempts = std::make_shared<int>(0);
-    wait->setInterval(100);
-    QObject::connect(wait, &QTimer::timeout, wait, [guard, wait, attempts, notebookId, spot] {
-        if (guard && guard->isVisible() && ++*attempts < 150)
-            return;
-        wait->stop();
-        wait->deleteLater();
-        if (!guard || !guard->isVisible())
-            kobalt::platform::stockNotebooks().open(notebookId, spot);
-    });
-    close();
-    wait->start();
+    const bool opened = kobalt::platform::stockNotebooks().open(
+            stockLinks.notebook, spot, this, [guard] {
+                if (!guard)
+                    return;
+                auto &links = guard->stockLinks;
+                if (!links.pending.isEmpty() && !links.notebook.isEmpty()) {
+                    const auto left = kobalt::platform::stockNotebooks().spot(links.notebook);
+                    if (left.valid())
+                        links.places.insert(links.pending,
+                                            { left.part, left.offset.x(), left.offset.y() });
+                    links.pending.clear();
+                    guard->saveStockLinks();
+                }
+                guard->annotationFrame.clear();
+                guard->syncAnnotations();
+                guard->settleQuickAnnotations();
+                guard->setProperty("reader_full_flash", true);
+                guard->refresh();
+            });
+    if (!opened && !stockLinks.pending.isEmpty()) {
+        stockLinks.pending.clear();
+        saveStockLinks();
+    }
 }
 
 void Reader::showAnnotationMatches(QVector<QString> ids, QRect anchor, int listPage)
