@@ -191,7 +191,17 @@
 - Pages are saved on the writer thread 4 seconds after the last stroke, on page changes and on Done. They live in `.adds/kobalt/notebooks/<book folder>/` as `page-001.png` and on, with transparent paper, and `links.json` maps highlight IDs to page numbers. The book folder name matches the annotations folder.
 - Deleting a highlight keeps its page.
 
+### Kobo's pen layer (firmware 4)
+
+- On firmware 4 the notebook page draws with Nickel's own pen layer (`SketchNote`, the one Nickel uses for stylus markup on book pages) instead of Kobalt's strokes. Nickel handles the pen, its pressure, the stylus eraser, the handwriting refresh, and undo and redo. Only the pen draws; fingers work the toolbar.
+- The toolbar shows Redo in place of Pen/Eraser. Done returns to the book page.
+- The whole notebook of a book is one file, `.adds/kobalt/notebooks/<book>.notebook`: JSON with `pages` (each page's strokes as an SVG document, in order) and `links` (highlight ID to page number). The file is rewritten on the writer thread when a page is saved.
+- Nickel's layer loads strokes only from an SVG file, so the page being opened is first written to `/tmp/kobalt-notebook-page.svg`, which is in memory.
+- While the layer is shown, the reader's flush passes Nickel's refresh policy on unchanged.
+
 ### Kobo notebooks (firmware 4)
+
+This applies only where Nickel's pen layer is missing.
 
 - On firmware 4, Notebook opens the book's notebook in the Kobo's own notebook app instead of the page above. The first time, a list of the notebooks in My Notebooks asks which one belongs to the book; the choice is kept in `stock.json` in the book's notebook folder. A notebook that no longer exists asks again.
 - Kobalt closes the book and Nickel opens the notebook. Nickel saves where each notebook was left (its page and scroll offset) in `Kobo eReader.conf`, group `IInkSettings`.

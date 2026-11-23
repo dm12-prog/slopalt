@@ -1,3 +1,4 @@
+#include "platform/api/native_ink.h"
 #include "platform/api/stock_notebook.h"
 #include <QFileInfo>
 #include <QUrl>
@@ -1747,7 +1748,10 @@ bool Reader::openLinkedNotebook(QPoint bodyPoint)
 
 bool Reader::useStockNotebooks() const
 {
-    return kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
+    // The host's pen layer inside the reader comes first: its notebook stays
+    // with the book and closes back onto the page.
+    return !kobalt::platform::nativeInk().available()
+            && kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
 }
 
 void Reader::saveStockLinks()

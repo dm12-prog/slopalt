@@ -1597,6 +1597,7 @@
 "notebook.pen" = "Pen";
 "notebook.eraser" = "Eraser";
 "notebook.undo" = "Undo";
+"notebook.redo" = "Redo";
 "notebook.clear" = "Clear";
 "notebook.page" = "Page %1 of %2";
 "notebook.choose_stock" = "Choose this book’s notebook";

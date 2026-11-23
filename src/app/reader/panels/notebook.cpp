@@ -1,4 +1,5 @@
 #include "notebook.h"
+#include "platform/api/native_ink.h"
 #include "storage/notebook_store.h"
 #include "storage/record_writer.h"
 #include "support/strings.h"
@@ -62,6 +63,8 @@ QVector<Contact> contacts(const QTouchEvent *event)
 
 QHash<QString, int> Notebook::readLinks(const QString &folder)
 {
+    if (platform::nativeInk().available())
+        return storage::notebook::readBook(folder).links;
     return storage::notebook::readLinks(folder);
 }
 
@@ -77,8 +80,30 @@ Notebook::Notebook(QWidget *parent, const QString &folder, const QString &highli
     setAttribute(Qt::WA_AcceptTouchEvents);
     setAttribute(Qt::WA_OpaquePaintEvent);
     setFocusPolicy(Qt::StrongFocus);
-    links_ = readLinks(folder_);
-    pages_ = storage::notebook::lastPage(folder_);
+    setGeometry(parent->rect());
+    if (platform::nativeInk().available()) {
+        pad_ = new QWidget(this);
+        padInner_ = new QWidget(pad_);
+        pad_->setGeometry(canvasRect());
+        padInner_->setGeometry(pad_->rect());
+        pad_->show();
+        inkLayer_ = platform::nativeInk().create(this, pad_, canvasRect());
+        native_ = !inkLayer_.isNull();
+        if (native_) {
+            inkLayer_->installEventFilter(this);
+        } else {
+            delete pad_;
+            pad_ = padInner_ = nullptr;
+        }
+    }
+    if (native_) {
+        book_ = storage::notebook::readBook(folder_);
+        links_ = book_.links;
+        pages_ = int(book_.pages.size());
+    } else {
+        links_ = readLinks(folder_);
+        pages_ = storage::notebook::lastPage(folder_);
+    }
     for (const int page : links_)
         pages_ = qMax(pages_, page);
     int first = 1;
@@ -107,8 +132,9 @@ Notebook::Notebook(QWidget *parent, const QString &folder, const QString &highli
     excerptPage_ = first;
     // Follow the reader window through rotations.
     parent->installEventFilter(this);
-    setGeometry(parent->rect());
     page_ = first;
+    // Showing sends the pen layer its first resize, which empties it, so the
+    // page loads after that.
     show();
     raise();
     setFocus(Qt::OtherFocusReason);
@@ -119,6 +145,8 @@ Notebook::~Notebook()
 {
     // Destroyed without Done, as when the book closes: keep the drawing.
     cancelStroke();
+    if (native_ && inkLayer_)
+        platform::nativeInk().finish(inkLayer_);
     savePage();
     if (fast_ && fastRefresh_)
         fastRefresh_(false);
@@ -183,6 +211,10 @@ QString Notebook::buttonLabel(Button button) const
     case Button::Next:
         return QStringLiteral("›");
     case Button::Tool:
+        // The host's pen layer erases with the stylus eraser, so the cell
+        // holds Redo instead.
+        if (native_)
+            return strings::get("notebook.redo");
         return strings::get(tool_ == Tool::Pen ? "notebook.pen" : "notebook.eraser");
     case Button::Undo:
         return strings::get("notebook.undo");
@@ -222,6 +254,14 @@ void Notebook::loadPage(int page)
     current_ = Stroke();
     drawing_ = false;
     dirty_ = false;
+    if (native_) {
+        const QByteArray svg = book_.pages.value(page_ - 1);
+        platform::nativeInk().load(inkLayer_, svg.contains("<path")
+                                                      ? storage::notebook::scratchPage(svg)
+                                                      : QString());
+        update();
+        return;
+    }
     const QSize size = canvasRect().size().expandedTo(QSize(1, 1));
     base_ = QImage(size, QImage::Format_ARGB32_Premultiplied);
     base_.fill(Qt::transparent);
@@ -244,6 +284,27 @@ void Notebook::savePage()
     if (!dirty_)
         return;
     dirty_ = false;
+    if (native_) {
+        if (!inkLayer_)
+            return;
+        const QByteArray svg = platform::nativeInk().svg(inkLayer_, inkLayer_->rect());
+        const bool blank = !svg.contains("<path");
+        if (blank && page_ > book_.pages.size())
+            return;
+        // Pages before a new one stay as blank entries, so numbers keep their place.
+        while (book_.pages.size() < page_)
+            book_.pages.append(QByteArray());
+        book_.pages[page_ - 1] = blank ? QByteArray() : svg;
+        if (!highlight_.isEmpty() && !links_.contains(highlight_) && !blank)
+            links_.insert(highlight_, page_);
+        book_.links = links_;
+        pages_ = qMax(pages_, int(book_.pages.size()));
+        const auto book = book_;
+        const QString bookFolder = folder_;
+        pageWriter().post(
+                [book, bookFolder] { return storage::notebook::writeBook(bookFolder, book); }, {});
+        return;
+    }
     bool empty = true;
     for (int y = 0; y < ink_.height() && empty; ++y) {
         const auto *line = reinterpret_cast<const QRgb *>(ink_.constScanLine(y));
@@ -289,6 +350,8 @@ void Notebook::goToPage(int page)
 void Notebook::finish()
 {
     cancelStroke();
+    if (native_ && inkLayer_)
+        platform::nativeInk().finish(inkLayer_);
     savePage();
     if (closed)
         closed();
@@ -307,10 +370,22 @@ void Notebook::run(Button button)
         goToPage(page_ + 1);
         return;
     case Button::Tool:
+        if (native_) {
+            platform::nativeInk().redo(inkLayer_);
+            dirty_ = true;
+            autosave_.start();
+            return;
+        }
         tool_ = tool_ == Tool::Pen ? Tool::Eraser : Tool::Pen;
         update(toolbarRect());
         return;
     case Button::Undo:
+        if (native_) {
+            platform::nativeInk().undo(inkLayer_);
+            dirty_ = true;
+            autosave_.start();
+            return;
+        }
         if (!strokes_.isEmpty()) {
             strokes_.removeLast();
             dirty_ = true;
@@ -320,6 +395,12 @@ void Notebook::run(Button button)
         }
         return;
     case Button::Clear: {
+        if (native_) {
+            platform::nativeInk().load(inkLayer_, QString());
+            dirty_ = true;
+            autosave_.start();
+            return;
+        }
         Stroke clear;
         clear.clear = true;
         strokes_.append(clear);
@@ -396,6 +477,8 @@ void Notebook::press(QPointF point, qreal pressure)
         return;
     }
     pressed_ = Button::None;
+    if (native_)
+        return;
     autosave_.stop();
     fastEnd_.stop();
     if (!fast_) {
@@ -490,6 +573,24 @@ bool Notebook::eventFilter(QObject *object, QEvent *event)
 {
     if (object == parentWidget() && event->type() == QEvent::Resize)
         setGeometry(parentWidget()->rect());
+    if (native_ && object == inkLayer_) {
+        // The pen layer handles its touches itself. Only note that the page
+        // may have changed, and save once the pen has rested.
+        switch (event->type()) {
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+            dirty_ = true;
+            autosave_.stop();
+            break;
+        case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
+            dirty_ = true;
+            autosave_.start();
+            break;
+        default:
+            break;
+        }
+    }
     return QWidget::eventFilter(object, event);
 }
 
@@ -584,6 +685,10 @@ void Notebook::keyPressEvent(QKeyEvent *event)
 void Notebook::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    if (native_) {
+        placeInkLayer();
+        return;
+    }
     if (ink_.size() == canvasRect().size())
         return;
     // A rotation keeps the drawing: save it, then reload at the new size.
@@ -596,6 +701,19 @@ void Notebook::resizeEvent(QResizeEvent *event)
         painter.drawImage(0, 0, keep);
         ink_ = base_;
     }
+}
+
+void Notebook::placeInkLayer()
+{
+    if (!inkLayer_ || inkLayer_->geometry() == canvasRect())
+        return;
+    // The pen layer empties itself when its size changes: keep the page.
+    platform::nativeInk().finish(inkLayer_);
+    savePage();
+    pad_->setGeometry(canvasRect());
+    padInner_->setGeometry(pad_->rect());
+    inkLayer_->setGeometry(canvasRect());
+    loadPage(page_);
 }
 
 void Notebook::paintEvent(QPaintEvent *event)
@@ -636,7 +754,7 @@ void Notebook::paintEvent(QPaintEvent *event)
             const QRect rect = buttonRect(button);
             const bool disabled = (button == Button::Previous && page_ <= 1)
                     || (button == Button::Next && page_ > pages_)
-                    || (button == Button::Undo && strokes_.isEmpty());
+                    || (button == Button::Undo && !native_ && strokes_.isEmpty());
             painter.setPen(disabled ? QColor(170, 170, 170) : QColor(Qt::black));
             if (button == Button::Previous || button == Button::Next) {
                 QFont arrow = ui::interfaceFont(ui::px(48));

@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 namespace kobalt::storage {
 class RecordWriter;
@@ -20,6 +21,24 @@ int lastPage(const QString &folder);
 QHash<QString, int> readLinks(const QString &folder);
 bool writePage(const QString &folder, int page, const QImage &image);
 bool writeLinks(const QString &folder, const QHash<QString, int> &links);
+
+// A book's whole notebook in one file, `folder`.notebook, used where the
+// host's own pen layer draws the pages: each page is the SVG document of its
+// strokes, and `links` maps a highlight ID to its page number.
+struct Book
+{
+    QVector<QByteArray> pages;
+    QHash<QString, int> links;
+};
+
+QString bookFile(const QString &folder);
+// Empty when the file is missing or unreadable.
+Book readBook(const QString &folder);
+bool writeBook(const QString &folder, const Book &book);
+// Puts one page's SVG in a file in memory (/tmp), for a pen layer that loads
+// strokes from a file only, and returns its path. Empty on failure. It does
+// not touch storage, so the main thread may call it.
+QString scratchPage(const QByteArray &svg);
 
 // The book's Kobo (Nickel) notebook, in stock.json: its content ID, the place
 // in it that each linked highlight opens, and the highlight waiting for the

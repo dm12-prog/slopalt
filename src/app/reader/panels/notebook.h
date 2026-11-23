@@ -1,4 +1,5 @@
 #pragma once
+#include "storage/notebook_store.h"
 #include <QHash>
 #include <QImage>
 #include <QPointF>
@@ -24,6 +25,11 @@ class RecordWriter;
 // The notebook covers the whole reader window. Strokes are painted into an
 // image as the pen moves, and only the changed rectangle is updated, so the
 // e-ink refresh stays small. Saving runs on the shared writer thread.
+//
+// Where the host has its own pen layer (platform::nativeInk), that layer
+// draws and erases the strokes instead, over the paper this widget paints.
+// The whole notebook is then one file, `folder`.notebook, with a page's
+// strokes as SVG; see storage::notebook::Book.
 class Notebook final : public QWidget
 {
 public:
@@ -93,6 +99,7 @@ private:
     QRect canvasRect() const;
     qreal widthFor(qreal pressure) const;
     void endFastRefreshLater();
+    void placeInkLayer();
 
     QString folder_, highlight_, excerpt_;
     QHash<QString, int> links_;
@@ -108,5 +115,12 @@ private:
     Tool tool_ = Tool::Pen;
     std::function<void(bool)> fastRefresh_;
     QTimer fastEnd_, autosave_;
+    // The host's pen layer, and the widget under it that takes the touches
+    // the layer passes on: its one child swallows them, so a finger or a palm
+    // on the paper neither draws nor reaches this widget.
+    QPointer<QWidget> inkLayer_;
+    QWidget *pad_ = nullptr, *padInner_ = nullptr;
+    storage::notebook::Book book_;
+    bool native_ = false;
 };
 } // namespace kobalt

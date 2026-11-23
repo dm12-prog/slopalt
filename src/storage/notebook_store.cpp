@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
@@ -11,6 +13,8 @@
 namespace kobalt::storage::notebook {
 namespace {
 constexpr qint64 maxLinksBytes = 1 << 20;
+// A page of dense handwriting is a few hundred kilobytes of SVG.
+constexpr qint64 maxBookBytes = 64 << 20;
 }
 
 QString pageFile(const QString &folder, int page)
@@ -68,6 +72,64 @@ bool writeLinks(const QString &folder, const QHash<QString, int> &links)
     if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
         return false;
     return out.commit();
+}
+
+QString bookFile(const QString &folder)
+{
+    return folder + ".notebook";
+}
+
+Book readBook(const QString &folder)
+{
+    Book book;
+    QFile file(bookFile(folder));
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maxBookBytes)
+        return book;
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    const auto pages = object.value("pages").toArray();
+    for (const auto &page : pages) {
+        if (book.pages.size() >= maxPages)
+            break;
+        book.pages.append(page.toString().toUtf8());
+    }
+    const auto links = object.value("links").toObject();
+    for (auto it = links.begin(); it != links.end(); ++it) {
+        const int page = it.value().toInt();
+        if (page >= 1 && page <= maxPages)
+            book.links.insert(it.key(), page);
+    }
+    return book;
+}
+
+bool writeBook(const QString &folder, const Book &book)
+{
+    QJsonArray pages;
+    for (const auto &page : book.pages)
+        pages.append(QString::fromUtf8(page));
+    QJsonObject links;
+    for (auto it = book.links.begin(); it != book.links.end(); ++it)
+        links.insert(it.key(), it.value());
+    QJsonObject object;
+    object.insert("version", 1);
+    object.insert("pages", pages);
+    object.insert("links", links);
+    const QByteArray data = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (!QDir().mkpath(QFileInfo(bookFile(folder)).path()))
+        return false;
+    QSaveFile out(bookFile(folder));
+    if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
+        return false;
+    return out.commit();
+}
+
+QString scratchPage(const QByteArray &svg)
+{
+    const QString path = QStringLiteral("/tmp/kobalt-notebook-page.svg");
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(svg) != svg.size())
+        return {};
+    out.close();
+    return path;
 }
 
 StockLinks readStockLinks(const QString &folder)

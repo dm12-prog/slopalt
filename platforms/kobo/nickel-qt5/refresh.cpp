@@ -2,6 +2,7 @@
 #include "../display/annotation_damage.h"
 #include "platform/api/kobo_refresh.h"
 #include "refresh.h"
+#include "native_ink.h"
 #include "platforms/kobo/display/single_update.h"
 #include "platforms/kobo/display/page_animation.h"
 #include "platforms/kobo/display/keyboard_refresh.h"
@@ -245,6 +246,13 @@ static void flushReaderUsing(QBackingStore *store, const QRegion &region, QWindo
         return;
     }
     previousDark = dark;
+    // Nickel's pen layer chooses the refresh of its own strokes, and of what
+    // the notebook page draws around them, as it does in Nickel's reader.
+    if (nickel_qt5::nativeInkShown() && !pageTurn && !direction) {
+        keyboardPixels.clear();
+        deliver(region, flags);
+        return;
+    }
     // While a finger drags a selection or a handle, each step uses the direct
     // waveform, which only drives pixels to black or white and is much faster
     // than the text waveforms. Partial mode leaves unchanged pixels alone.
