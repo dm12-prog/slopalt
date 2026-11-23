@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-kobo-qt5:
@@ -38,3 +38,14 @@ jobs:
           name: kobalt-notebook-qt5
           path: build/release/*
           if-no-files-found: error
+      # A prerelease per commit, so the package can be fetched without an
+      # Actions login.
+      - name: Publish a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_SHA::8}"
+          gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$tag" build/release/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease --title "Slopalt build $tag" \
+            --notes "Kobo firmware 4 (Qt5) package built from ${GITHUB_REF_NAME} at ${GITHUB_SHA}."
