@@ -39,7 +39,6 @@
 #include "app/reader/panels/light_panel.h"
 #include "app/reader/panels/bookmark_list.h"
 #include "app/reader/panels/notebook.h"
-#include "app/reader/panels/notebook_picker.h"
 #include "storage/notebook_store.h"
 #include "app/reader/panels/note_editor.h"
 #include "app/reader/panels/dictionary_panel.h"
@@ -263,13 +262,17 @@ private:
     // body, if it has one.
     bool openLinkedNotebook(QPoint bodyPoint);
     QPointer<kobalt::Notebook> notebook;
-    // The book's notebook in the Kobo's own notebook app, when the host has one.
-    bool useStockNotebooks() const;
-    void openStockNotebook(const QString &id);
-    void chooseStockNotebook(std::function<void()> chosen);
-    void saveStockLinks();
-    kobalt::storage::notebook::StockLinks stockLinks;
-    QPointer<kobalt::NotebookPicker> notebookPicker;
+    // The book's own notebook in the host's notebook engine, where the host
+    // has one: one file, a page for each highlight that has notes.
+    bool useHostNotebook() const;
+    void openHostNotebook(const QString &id);
+    void showHostNotebook(const QString &id);
+    kobalt::storage::notebook::HostBook hostBook;
+    // True from a request to open the host's notebook until it has closed.
+    bool hostNotebookOpening = false;
+    // True once the host's notebook could not be opened; the reader's own
+    // notebook page is used from then on.
+    bool hostNotebookFailed = false;
     QString notebookFolder;
     QHash<QString, int> notebookLinks;
     void showSavedAnnotation(const QString &id, QRect anchor, bool navigate = false);

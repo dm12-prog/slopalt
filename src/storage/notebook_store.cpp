@@ -1,7 +1,6 @@
 #include "notebook_store.h"
 #include "record_writer.h"
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -132,66 +131,50 @@ QString scratchPage(const QByteArray &svg)
     return path;
 }
 
-StockLinks readStockLinks(const QString &folder)
+QString hostBookFile(const QString &folder)
 {
-    StockLinks links;
-    QFile file(folder + "/stock.json");
-    if (!file.open(QIODevice::ReadOnly) || file.size() > maxLinksBytes)
-        return links;
-    const auto object = QJsonDocument::fromJson(file.readAll()).object();
-    links.notebook = object.value("notebook").toString();
-    links.pending = object.value("pending").toString();
-    const auto places = object.value("places").toObject();
-    for (auto it = places.begin(); it != places.end(); ++it) {
-        const auto place = it.value().toObject();
-        StockPlace value;
-        value.part = place.value("part").toInt(-1);
-        value.x = place.value("x").toInt();
-        value.y = place.value("y").toInt();
-        if (value.part >= 0)
-            links.places.insert(it.key(), value);
-    }
-    return links;
+    return folder + "/book.nebo";
 }
 
-bool writeStockLinks(const QString &folder, const StockLinks &links)
+bool prepareHostBook(const QString &folder)
 {
-    QJsonObject places;
-    for (auto it = links.places.begin(); it != links.places.end(); ++it) {
-        QJsonObject place;
-        place.insert("part", it.value().part);
-        place.insert("x", it.value().x);
-        place.insert("y", it.value().y);
-        places.insert(it.key(), place);
+    return QDir().mkpath(folder);
+}
+
+HostBook readHostBook(const QString &folder)
+{
+    HostBook book;
+    QFile file(folder + "/pages.json");
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maxLinksBytes)
+        return book;
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    const auto pages = object.value("pages").toArray();
+    for (const auto &page : pages) {
+        if (book.pages.size() >= maxPages)
+            break;
+        book.pages.append(page.toString());
     }
+    book.pending = object.value("pending").toString();
+    return book;
+}
+
+bool writeHostBook(const QString &folder, const HostBook &book)
+{
+    QJsonArray pages;
+    for (const auto &page : book.pages)
+        pages.append(page);
     QJsonObject object;
-    object.insert("notebook", links.notebook);
-    if (!links.pending.isEmpty())
-        object.insert("pending", links.pending);
-    object.insert("places", places);
+    object.insert("version", 1);
+    object.insert("pages", pages);
+    if (!book.pending.isEmpty())
+        object.insert("pending", book.pending);
     const QByteArray data = QJsonDocument(object).toJson();
     if (!QDir().mkpath(folder))
         return false;
-    QSaveFile out(folder + "/stock.json");
+    QSaveFile out(folder + "/pages.json");
     if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
         return false;
     return out.commit();
-}
-
-QStringList findStockNotebooks(const QString &root)
-{
-    QStringList found;
-    const QString base = QDir(root).absolutePath();
-    QDirIterator it(base, QStringList() << "*.nebo", QDir::Files, QDirIterator::Subdirectories);
-    while (it.hasNext() && found.size() < 500) {
-        const QString path = it.next();
-        const QString relative = path.mid(base.size() + 1);
-        if (relative.count('/') > 3 || relative.startsWith('.') || relative.contains("/."))
-            continue;
-        found.append(path);
-    }
-    found.sort(Qt::CaseInsensitive);
-    return found;
 }
 
 RecordWriter &writer()

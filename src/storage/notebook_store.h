@@ -40,25 +40,48 @@ bool writeBook(const QString &folder, const Book &book);
 // not touch storage, so the main thread may call it.
 QString scratchPage(const QByteArray &svg);
 
-// The book's Kobo (Nickel) notebook, in stock.json: its content ID, the place
-// in it that each linked highlight opens, and the highlight waiting for the
-// place where the notebook is left the next time it closes.
-struct StockPlace
+// The book's own notebook in the host's notebook format, where the host has
+// a notebook engine: book.nebo in the book's folder holds every page, and
+// pages.json beside it names, for each page in order, the highlight the page
+// belongs to (an empty string for a page without one).
+struct HostBook
 {
-    int part = -1, x = 0, y = 0;
+    QStringList pages;
+    // The highlight that the last page opened for, while that page belongs
+    // to none. The host puts an empty page behind a page only once it has
+    // ink, so the last page may still be empty: it becomes this highlight's
+    // page when it is no longer the last one.
+    QString pending;
+
+    // The page of this highlight, counted from 0, or -1.
+    int pageOf(const QString &highlight) const
+    {
+        return highlight.isEmpty() ? -1 : pages.indexOf(highlight);
+    }
+
+    // The highlight that the last page waits for, if any.
+    QString waiting() const
+    {
+        return !pages.isEmpty() && pages.last().isEmpty() ? pending : QString();
+    }
+
+    // The page that opens for this highlight: its own, or the last page
+    // while that one waits for it. -1 asks for a new page.
+    int pageFor(const QString &highlight) const
+    {
+        const int own = pageOf(highlight);
+        if (own < 0 && !highlight.isEmpty() && highlight == waiting())
+            return pages.size() - 1;
+        return own;
+    }
 };
 
-struct StockLinks
-{
-    QString notebook, pending;
-    QHash<QString, StockPlace> places;
-};
-
-StockLinks readStockLinks(const QString &folder);
-bool writeStockLinks(const QString &folder, const StockLinks &links);
-// The .nebo files under `root`, at most three folders deep, sorted by path.
-// Hidden entries are skipped.
-QStringList findStockNotebooks(const QString &root);
+QString hostBookFile(const QString &folder);
+// Makes the book's folder. The host creates the notebook file, not its folder.
+bool prepareHostBook(const QString &folder);
+// Empty when the file is missing or unreadable.
+HostBook readHostBook(const QString &folder);
+bool writeHostBook(const QString &folder, const HostBook &book);
 // One writer for every notebook write, never destroyed, so a write posted
 // just before a notebook or reader closes still finishes.
 RecordWriter &writer();

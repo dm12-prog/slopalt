@@ -29,7 +29,10 @@ jobs:
         run: |
           image=$(sh platforms/sdk-image.sh qt5)
           docker pull "$image"
-          KOBALT_VERBOSE_DIAGNOSTICS=ON bash platforms/kobo/build.sh qt5
+          # Verbose diagnostics log every read of the touch and pen drivers,
+          # which slows handwriting. The fork package is built the way the
+          # release packages are; the reader's Debug page turns detail on.
+          KOBALT_VERBOSE_DIAGNOSTICS=OFF bash platforms/kobo/build.sh qt5
           mkdir -p build/release
           cp build/kobo-qt5/Kobalt-qt5*.zip build/release/
           sha256sum build/release/* > build/release/SHA256SUMS.txt

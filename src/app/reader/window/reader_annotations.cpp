@@ -1,7 +1,11 @@
 #include "platform/api/native_ink.h"
-#include "platform/api/stock_notebook.h"
-#include <QFileInfo>
-#include <QUrl>
+#include "platform/api/host_notebook.h"
+#include "storage/record_writer.h"
+#include "ui/style/fonts.h"
+#include "ui/style/scale.h"
+#include <QCoreApplication>
+#include <QFontMetrics>
+#include <QPainter>
 #include "ui/controls/highlight_palette.h"
 #include "ui/controls/icons.h"
 #include "ui/controls/text.h"
@@ -1698,8 +1702,8 @@ void Reader::openNotebook(const QString &id)
 {
     if (notebookFolder.isEmpty())
         return;
-    if (useStockNotebooks()) {
-        openStockNotebook(id);
+    if (useHostNotebook()) {
+        openHostNotebook(id);
         return;
     }
     if (notebook)
@@ -1731,11 +1735,11 @@ void Reader::openNotebook(const QString &id)
 
 bool Reader::openLinkedNotebook(QPoint bodyPoint)
 {
-    if ((notebookLinks.isEmpty() && stockLinks.places.isEmpty()) || notebookFolder.isEmpty())
+    const bool host = useHostNotebook();
+    if (notebookFolder.isEmpty() || (host ? hostBook.pages.isEmpty() : notebookLinks.isEmpty()))
         return false;
     for (const auto &group : savedHighlightGroups) {
-        if (useStockNotebooks() ? !stockLinks.places.contains(group.first)
-                                : !notebookLinks.contains(group.first))
+        if (host ? hostBook.pageOf(group.first) < 0 : !notebookLinks.contains(group.first))
             continue;
         for (const auto &rect : group.second)
             if (rect.contains(bodyPoint)) {
@@ -1746,90 +1750,169 @@ bool Reader::openLinkedNotebook(QPoint bodyPoint)
     return false;
 }
 
-bool Reader::useStockNotebooks() const
+bool Reader::useHostNotebook() const
 {
-    // The host's own notebook app comes first: it has the host's fast pen,
-    // tools and files. The book stays open under it.
-    return kobalt::platform::stockNotebooks().available() && !notebookFolder.isEmpty();
+    // The host's notebook engine comes first: it has the host's fast pen and
+    // tools. The book stays open under it.
+    return !hostNotebookFailed && kobalt::platform::hostNotebooks().available()
+            && !notebookFolder.isEmpty();
 }
 
-void Reader::saveStockLinks()
+namespace {
+// The highlighted text above a notebook page: a few lines, in quotes.
+constexpr int excerptUnits = 280;
+
+QString excerptText(const QString &text)
 {
-    const auto links = stockLinks;
-    const auto folder = notebookFolder;
-    kobalt::storage::notebook::writer().post(
-            [links, folder] { return kobalt::storage::notebook::writeStockLinks(folder, links); },
-            {});
+    QString shown = text.simplified();
+    if (shown.isEmpty())
+        return {};
+    if (shown.size() > excerptUnits) {
+        // Cut at the last space that fits, where there is one.
+        const int space = shown.lastIndexOf(QLatin1Char(' '), excerptUnits);
+        shown = shown.left(space > excerptUnits / 2 ? space : excerptUnits) + QStringLiteral("…");
+    }
+    return QStringLiteral("“%1”").arg(shown);
 }
 
-void Reader::chooseStockNotebook(std::function<void()> chosen)
+QFont excerptFont()
 {
-    if (notebookPicker)
-        delete notebookPicker.data();
-    annotationPopover->hide();
-    const auto root = kobalt::platform::stockNotebooks().root;
-    QString current;
-    if (stockLinks.notebook.startsWith("file://"))
-        current = QUrl(stockLinks.notebook).toLocalFile();
-    notebookPicker = new kobalt::NotebookPicker(
-            this, root, kobalt::storage::notebook::findStockNotebooks(root), current);
-    notebookPicker->finished = [this, chosen](const QString &file) {
-        if (notebookPicker) {
-            notebookPicker->hide();
-            notebookPicker->deleteLater();
-            notebookPicker.clear();
-        }
-        refresh();
-        if (file.isEmpty())
-            return;
-        const auto id = QUrl::fromLocalFile(file).toString();
-        if (id != stockLinks.notebook) {
-            // Places belong to one notebook.
-            stockLinks.notebook = id;
-            stockLinks.places.clear();
-            stockLinks.pending.clear();
-        }
-        saveStockLinks();
-        if (chosen)
-            chosen();
-    };
+    QFont font = ui::interfaceFont(ui::px(26));
+    font.setItalic(true);
+    return font;
 }
 
-void Reader::openStockNotebook(const QString &id)
+constexpr int excerptFlags = Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap;
+
+QRect excerptArea(const QRect &band)
 {
-    if (stockLinks.notebook.isEmpty()
-        || !QFileInfo::exists(QUrl(stockLinks.notebook).toLocalFile())) {
-        chooseStockNotebook([this, id] { openStockNotebook(id); });
+    return band.adjusted(ui::px(40), ui::px(18), -ui::px(40), -ui::px(18));
+}
+} // namespace
+
+void Reader::openHostNotebook(const QString &id)
+{
+    if (hostNotebookOpening)
         return;
-    }
-    kobalt::platform::StockNotebookSpot spot;
-    if (stockLinks.places.contains(id)) {
-        const auto place = stockLinks.places.value(id);
-        spot.part = place.part;
-        spot.offset = QPoint(place.x, place.y);
-        stockLinks.pending.clear();
-    } else {
-        // A new link: the place where the notebook is left becomes this
-        // highlight's place when the book opens again.
-        stockLinks.pending = id;
-    }
-    saveStockLinks();
+    hostNotebookOpening = true;
     annotationPopover->hide();
-    // The book stays open under the notebook. When the notebook closes, the
-    // place it was left at becomes a new link's place, and the page returns.
+    // The host creates the notebook file, but not the folder it is in.
+    const auto folder = notebookFolder;
     QPointer<Reader> guard(this);
-    const bool opened = kobalt::platform::stockNotebooks().open(
-            stockLinks.notebook, spot, this, [guard] {
+    kobalt::storage::notebook::writer().post(
+            [folder] { return kobalt::storage::notebook::prepareHostBook(folder); },
+            [guard, id](bool made) {
+                // The writer's thread reports here; the reader lives on the main thread.
+                kobalt::qt::invoke(
+                        QCoreApplication::instance(),
+                        [guard, id, made] {
+                            if (!guard)
+                                return;
+                            if (made) {
+                                guard->showHostNotebook(id);
+                                return;
+                            }
+                            guard->hostNotebookOpening = false;
+                            guard->hostNotebookFailed = true;
+                            guard->openNotebook(id);
+                        },
+                        Qt::QueuedConnection);
+            });
+}
+
+void Reader::showHostNotebook(const QString &id)
+{
+    using kobalt::platform::HostNotebookResult;
+    kobalt::platform::HostNotebookRequest request;
+    request.file = kobalt::storage::notebook::hostBookFile(notebookFolder);
+    request.title = session->title();
+    request.page = hostBook.pageFor(id);
+    // The highlight above each page: the one the page belongs to, or the one
+    // the last page waits for.
+    QStringList owners = hostBook.pages;
+    if (!owners.isEmpty() && owners.last().isEmpty())
+        owners.last() = hostBook.waiting();
+    // The text of each of them, and of this one. Only highlights that still
+    // exist are asked for.
+    QSet<QString> saved;
+    for (const auto &item : highlights->highlights())
+        saved.insert(item.id);
+    QStringList wanted;
+    for (const auto &owner : owners)
+        if (saved.contains(owner) && !wanted.contains(owner))
+            wanted.append(owner);
+    if (saved.contains(id) && !wanted.contains(id))
+        wanted.append(id);
+    QHash<QString, QString> texts;
+    QVector<HighlightExcerpt> rows;
+    if (!wanted.isEmpty() && highlights->excerpts(wanted, &rows))
+        for (const auto &row : rows)
+            texts.insert(row.id, excerptText(row.text));
+    for (const auto &owner : owners)
+        request.excerpts.append(texts.value(owner));
+    request.excerpt = texts.value(id);
+    request.excerptHeight = [](const QString &text, int width) {
+        const QRect area = excerptArea(QRect(0, 0, width, ui::px(2000)));
+        const int lines = QFontMetrics(excerptFont()).boundingRect(area, excerptFlags, text).height();
+        return lines + 2 * ui::px(18);
+    };
+    request.paintExcerpt = [](QPainter &painter, const QRect &band, const QRect &area,
+                              const QString &text) {
+        painter.setFont(excerptFont());
+        painter.setPen(QColor(60, 60, 60));
+        painter.drawText(excerptArea(area), excerptFlags, text);
+        // A rule between the text and the page.
+        const int rule = qMax(1, ui::px(2));
+        painter.fillRect(QRect(band.left(), band.bottom() + 1 - rule, band.width(), rule),
+                         QColor(150, 150, 150));
+    };
+    QPointer<Reader> guard(this);
+    const bool opened = kobalt::platform::hostNotebooks().open(
+            request, this, [guard, id](const HostNotebookResult &result) {
                 if (!guard)
                     return;
-                auto &links = guard->stockLinks;
-                if (!links.pending.isEmpty() && !links.notebook.isEmpty()) {
-                    const auto left = kobalt::platform::stockNotebooks().spot(links.notebook);
-                    if (left.valid())
-                        links.places.insert(links.pending,
-                                            { left.part, left.offset.x(), left.offset.y() });
-                    links.pending.clear();
-                    guard->saveStockLinks();
+                guard->hostNotebookOpening = false;
+                if (result.known && !result.pages.isEmpty()) {
+                    // Each page keeps the highlight it had. A page that
+                    // opened for a highlight without belonging to one waits
+                    // for it while it is the last page: the host puts an
+                    // empty page behind a page once it has ink, so a page
+                    // that is no longer the last one was drawn on.
+                    const auto &old = guard->hostBook;
+                    kobalt::storage::notebook::HostBook book;
+                    const int count = result.pages.size();
+                    for (int i = 0; i < count; ++i) {
+                        const int origin = result.pages.at(i);
+                        QString owner, waiting;
+                        if (origin == HostNotebookResult::requested) {
+                            waiting = id;
+                        } else if (origin >= 0) {
+                            owner = old.pages.value(origin);
+                            if (origin + 1 == old.pages.size())
+                                waiting = old.waiting();
+                        }
+                        if (owner.isEmpty() && !waiting.isEmpty()) {
+                            if (i + 1 < count)
+                                owner = waiting;
+                            else
+                                book.pending = waiting;
+                        }
+                        // A highlight has one page: the first that names it.
+                        if (!owner.isEmpty() && book.pages.contains(owner))
+                            owner.clear();
+                        book.pages.append(owner);
+                    }
+                    if (book.pages.contains(book.pending))
+                        book.pending.clear();
+                    if (book.pages != old.pages || book.pending != old.pending) {
+                        guard->hostBook = book;
+                        const auto folder = guard->notebookFolder;
+                        kobalt::storage::notebook::writer().post(
+                                [folder, book] {
+                                    return kobalt::storage::notebook::writeHostBook(folder, book);
+                                },
+                                {});
+                    }
                 }
                 guard->annotationFrame.clear();
                 guard->syncAnnotations();
@@ -1837,9 +1920,12 @@ void Reader::openStockNotebook(const QString &id)
                 guard->setProperty("reader_full_flash", true);
                 guard->refresh();
             });
-    if (!opened && !stockLinks.pending.isEmpty()) {
-        stockLinks.pending.clear();
-        saveStockLinks();
+    if (!opened) {
+        // This firmware's notebook engine cannot be used; the reader's own
+        // notebook page takes over.
+        hostNotebookOpening = false;
+        hostNotebookFailed = true;
+        openNotebook(id);
     }
 }
 
