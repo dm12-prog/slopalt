@@ -1825,7 +1825,11 @@ void Reader::showHostNotebook(const QString &id)
     using kobalt::platform::HostNotebookResult;
     kobalt::platform::HostNotebookRequest request;
     request.file = kobalt::storage::notebook::hostBookFile(notebookFolder);
-    request.title = session->title();
+    // The host lists the notebook under this name and shows it on its back
+    // button.
+    request.title = session->title().trimmed();
+    if (request.title.isEmpty())
+        request.title = strings::get("annotations.notebook");
     request.page = hostBook.pageFor(id);
     // The highlight above each page: the one the page belongs to, or the one
     // the last page waits for.

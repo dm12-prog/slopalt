@@ -539,8 +539,8 @@ private:
             if (fresh_ && !grown_) {
                 // On the last page. If it has ink, the editor adds the empty
                 // page behind it, as it does after a stroke. Like Nickel,
-                // this waits until the editor is idle, a few seconds at most.
-                if (!addPage() && ++waits_ <= 20)
+                // this waits until the editor is idle, for a moment at most.
+                if (!addPage() && ++waits_ <= 10)
                     return;
                 grown_ = true;
                 continue;
