@@ -3,6 +3,7 @@
 #include "platforms/kobo/common/native_lifecycle.h"
 #include "platforms/kobo/common/native_symbol.h"
 #include "support/diagnostics.h"
+#include "support/main_thread.h"
 #include <QApplication>
 #include <QByteArray>
 #include <QEvent>
@@ -54,8 +55,9 @@
 // Nickel keeps each notebook's page (PartIndex) in Kobo eReader.conf, group
 // IInkSettings, under the file path with slashes replaced by underscores,
 // and opens the notebook there. A page that the notebook does not have opens
-// the first page. QSettings objects of one file share their data within a
-// process, so Nickel sees a change made here at once.
+// the first page. Nickel's settings answer from a cache of their own once
+// read, so the page is set through Nickel's own notebook settings
+// (IInkSettings), which change the cache and the file together.
 namespace kobalt {
 namespace {
 const char *const settingsFile = "/mnt/onboard/.kobo/Kobo/Kobo eReader.conf";
@@ -97,12 +99,27 @@ struct Api
     // The page on top of Nickel's page stack.
     QWidget *(*currentView)(const void *) =
             symbol<decltype(currentView)>("_ZNK20MainWindowController11currentViewEv");
+    // Nickel's settings of one notebook (IInkSettings) and the device they
+    // belong to.
+    const void *(*device)() = symbol<decltype(device)>("_ZN6Device16getCurrentDeviceEv");
+    void (*openSettings)(void *, const void *, const QString &) =
+            symbol<decltype(openSettings)>("_ZN12IInkSettingsC1ERK6DeviceRK7QString");
+    void (*setPartIndex)(void *, int) =
+            symbol<decltype(setPartIndex)>("_ZN12IInkSettings12setPartIndexEi");
+    void (*saveSettings)(void *) =
+            symbol<decltype(saveSettings)>("_ZN12IInkSettings20saveNotebookSettingsEv");
+    void (*closeSettings)(void *) = symbol<decltype(closeSettings)>("_ZN12IInkSettingsD1Ev");
 
     bool present() const
     {
         return construct && destroy && setId && setTitle && setContentType && setNumPages
                 && setMimeType && setUserId && basic && rawMime && user && create && openNotePad
                 && mainWindow && currentView;
+    }
+
+    bool settings() const
+    {
+        return device && openSettings && setPartIndex && saveSettings && closeSettings;
     }
 
     // The storage below holds a Volume only while Nickel's is this size.
@@ -148,15 +165,25 @@ struct Plugin
     // follows it.
     void (*moved)(QWidget *) = nullptr;
     void (*contentChanged)(QWidget *, std::shared_ptr<Editor>) = nullptr;
+    // The MyScript editor's getPart and isIdle, which its table of virtual
+    // functions holds at partFunction and idleFunction.
+    const void *getPart = nullptr;
+    const void *isIdle = nullptr;
     // True when the editor's code is the code of 4.38.23852 in the two
-    // places that addPage relies on.
+    // places that addPage relies on. The MyScript editor's table is checked
+    // on the editor itself.
     bool editorKnown = false;
 
     bool valid() const { return page && lastPage && goTo && basic; }
 };
 
-// The editor's std::weak_ptr<myscript::iink::Editor>.
+// The editor's std::weak_ptr<myscript::iink::Editor>. Its control block is
+// libstdc++'s with atomic counts, as in the firmware.
 constexpr int editorOffset = 60;
+#if defined(__GLIBCXX__)
+static_assert(__gnu_cxx::__default_lock_policy == __gnu_cxx::_S_atomic,
+              "the firmware's shared pointers count atomically");
+#endif
 // myscript::iink::Editor::getPart and isIdle in its table of virtual
 // functions.
 constexpr int partFunction = 8;
@@ -202,8 +229,11 @@ Plugin loadPlugin()
     static const unsigned char asks[] = { 0x09, 0x68, 0x05, 0x46, 0xfb, 0x60, 0x07,
                                           0xf1, 0x28, 0x00, 0x07, 0xf1, 0x30, 0x08,
                                           0x0b, 0x68, 0x1b, 0x6a, 0x98, 0x47 };
-    plugin.editorKnown = sameCode(find("_ZN17IInkNotePadWidget14setScrollValueEi"), 8, locks,
-                                  sizeof(locks))
+    // In the MyScript library, which the plugin loads.
+    plugin.getPart = find("_ZN8myscript4iink10EditorImpl7getPartEv");
+    plugin.isIdle = find("_ZN8myscript4iink10EditorImpl6isIdleEv");
+    plugin.editorKnown = plugin.getPart && plugin.isIdle
+            && sameCode(find("_ZN17IInkNotePadWidget14setScrollValueEi"), 8, locks, sizeof(locks))
             && sameCode(contentChanged, 16, asks, sizeof(asks));
     return plugin;
 }
@@ -215,6 +245,14 @@ bool hasPage(Editor *editor)
     using GetPart = std::shared_ptr<Part> (*)(Editor *);
     const auto *functions = *reinterpret_cast<const GetPart *const *>(editor);
     return functions[partFunction](editor) != nullptr;
+}
+
+// True when the MyScript editor's table of virtual functions has getPart and
+// isIdle where hasPage and idle call them.
+bool sameTable(Editor *editor, const Plugin &plugin)
+{
+    const auto *functions = *reinterpret_cast<const void *const *const *>(editor);
+    return functions[partFunction] == plugin.getPart && functions[idleFunction] == plugin.isIdle;
 }
 
 // True when the MyScript editor has nothing left to work through. The
@@ -231,6 +269,41 @@ QString settingsKey(const QString &file)
     QString path = file;
     path.replace('/', '_');
     return QStringLiteral("IInkSettings/") + path;
+}
+
+// Sets the page that Nickel opens the notebook in `file` on. Nickel's own
+// notebook settings read the notebook's settings, change the page and save
+// them the way Nickel saves them when a notebook closes: in its cache, and in
+// the file when the value changed. Without them the file alone is changed,
+// which Nickel reads only while it has not cached the notebook's settings.
+void rememberPage(const QString &file, int page)
+{
+    const auto &native = api();
+    mainthread::BlockingOperation operation("host-notebook-page");
+    const void *device = native.settings() ? native.device() : nullptr;
+    if (device) {
+        // An IInkSettings is 36 bytes in 4.38.23852.
+        alignas(8) unsigned char storage[128];
+        bool made = false, saved = false;
+        try {
+            native.openSettings(storage, device, file);
+            made = true;
+            native.setPartIndex(storage, page);
+            // Nickel's save: its cache, and the file and a sync of the disks
+            // when the value changed.
+            native.saveSettings(storage);
+            saved = true;
+        } catch (...) {
+        }
+        if (made)
+            native.closeSettings(storage);
+        if (saved)
+            return;
+    }
+    QSettings settings(settingsFile, QSettings::IniFormat);
+    auto values = settings.value(settingsKey(file)).toMap();
+    values.insert("PartIndex", page);
+    settings.setValue(settingsKey(file), values);
 }
 
 // The text above the page, drawn by the reader's own painter. It lies over
@@ -368,6 +441,9 @@ public:
         poll_.start();
     }
 
+    // Deletes `opener` once the notebook screen has arrived.
+    void keep(QObject *opener) { opener_ = opener; }
+
 private:
     enum class Stage { Waiting, Finding, Settling, Following, Plain };
 
@@ -382,13 +458,23 @@ private:
             return;
         }
         if (stage_ == Stage::Waiting) {
-            // The screen arrives a moment after the request. Nickel may
-            // first show a dialog of its own; give that a minute.
             if (top && top != before_) {
                 screen_ = top;
                 stage_ = Stage::Finding;
+                if (opener_)
+                    opener_->deleteLater();
                 diagnostic("host-notebook", { { "result", "shown" }, { "polls", polls_ } }, false);
-            } else if (polls_ > 400) {
+                return;
+            }
+            // The screen arrives a moment after the request. Nickel may
+            // first ask in a dialog of its own, as it does before it
+            // downloads the notebook files, and open the notebook when that
+            // is done. The reader waits while a dialog is open, a few
+            // seconds after the last one, and a minute without one.
+            if (dialogOpen()) {
+                asked_ = true;
+                quiet_ = 0;
+            } else if (++quiet_ > (asked_ ? 20 : 400)) {
                 finish("never-shown");
             }
             return;
@@ -415,6 +501,14 @@ private:
             settle();
         else if (stage_ == Stage::Following)
             follow();
+    }
+
+    static bool dialogOpen()
+    {
+        for (QWidget *widget : QApplication::topLevelWidgets())
+            if (widget->isVisible() && widget->inherits("QDialog"))
+                return true;
+        return false;
     }
 
     // Whether the notebook's screen is still one of Nickel's pages. Nickel
@@ -452,16 +546,23 @@ private:
 
     // The MyScript editor, kept alive while the result is. Empty when the
     // editor is gone or Nickel's editor is not laid out as checked.
-    std::shared_ptr<Editor> lockEditor() const
+    std::shared_ptr<Editor> lockEditor()
     {
         if (!plugin_.editorKnown || !editor_)
             return {};
         const auto &weak = *reinterpret_cast<const std::weak_ptr<Editor> *>(
                 reinterpret_cast<const char *>(editor_.data()) + editorOffset);
-        return weak.lock();
+        auto editor = weak.lock();
+        if (editor && !sameTable(editor.get(), plugin_)) {
+            // Another MyScript library: nothing is asked of its editor.
+            plugin_.editorKnown = false;
+            diagnostic("host-notebook", { { "result", "editor-table-unknown" } }, false);
+            return {};
+        }
+        return editor;
     }
 
-    bool showsPage() const
+    bool showsPage()
     {
         const auto editor = lockEditor();
         try {
@@ -685,6 +786,7 @@ private:
     }
 
     QPointer<QWidget> reader_, before_, screen_, editor_;
+    QPointer<QObject> opener_;
     QPointer<Band> band_;
     platform::HostNotebookRequest request_;
     std::function<void(const platform::HostNotebookResult &)> closed_;
@@ -692,8 +794,8 @@ private:
     QTimer poll_;
     Stage stage_ = Stage::Waiting;
     QVector<int> pages_;
-    int polls_ = 0, tries_ = 0, waits_ = 0, opened_ = 0, shown_ = -1;
-    bool fresh_ = false, grown_ = false;
+    int polls_ = 0, quiet_ = 0, tries_ = 0, waits_ = 0, opened_ = 0, shown_ = -1;
+    bool asked_ = false, fresh_ = false, grown_ = false;
 };
 
 bool open(const platform::HostNotebookRequest &request, QWidget *reader,
@@ -721,15 +823,6 @@ bool open(const platform::HostNotebookRequest &request, QWidget *reader,
         diagnostic("host-notebook", { { "result", "not-basic-volume" } }, false);
         return false;
     }
-    // Nickel opens the notebook on this page. The empty page of a new
-    // request is the last one.
-    const int page = request.page >= 0 ? request.page : qMax(0, request.excerpts.size() - 1);
-    {
-        QSettings settings(settingsFile, QSettings::IniFormat);
-        auto values = settings.value(settingsKey(request.file)).toMap();
-        values.insert("PartIndex", page);
-        settings.setValue(settingsKey(request.file), values);
-    }
     // An empty vector has the same layout for any element type.
     const QVector<int> keys;
     QPointer<QObject> opener = native.create(nullptr, volume.get(), &keys, nullptr);
@@ -737,13 +830,21 @@ bool open(const platform::HostNotebookRequest &request, QWidget *reader,
         diagnostic("host-notebook", { { "result", "no-opener" } }, false);
         return false;
     }
-    new Session(reader, native.currentView(main), request, std::move(closed));
+    auto *session = new Session(reader, native.currentView(main), request, std::move(closed));
     // The same mark and order as the browser handoff.
     reader->setProperty("kobalt_native_browser", true);
     reader->hide();
+    // Nickel opens the notebook on this page. The empty page of a new
+    // request is the last one. The reader takes no input from here on.
+    const int page = request.page >= 0 ? request.page : qMax(0, request.excerpts.size() - 1);
+    rememberPage(request.file, page);
     native.openNotePad(opener, volume.get());
+    // Without its parent the opener is the caller's to delete. When the
+    // notebook files are missing, Nickel first offers to download them with
+    // the opener as the dialog's receiver, and it opens the notebook from
+    // there; so the opener is kept until the notebook screen arrives.
     if (opener && !opener->parent())
-        opener->deleteLater();
+        session->keep(opener);
     diagnostic("host-notebook",
                { { "result", "opened" }, { "asked", request.page }, { "page", page } }, false);
     return true;
