@@ -23,8 +23,15 @@ struct HostNotebookRequest
     // The text shown above that page when `page` is -1.
     QString excerpt;
     // The text shown above each page the notebook already has, in page order.
-    // A page with an empty text shows none.
+    // A page with an empty text shows none. There is one for each page the
+    // notebook had when it last closed; a notebook with fewer pages was
+    // changed elsewhere, and its pages are then not matched to these.
     QStringList excerpts;
+    // Whether the last of those pages belongs to a highlight, and whether it
+    // waits for one. A request with page -1 takes that page only when it
+    // has neither, or when the host shows that it is empty.
+    bool lastOwned = false;
+    bool lastWaiting = false;
     // The band above the page that shows the text. The reader supplies how
     // tall it is, in pixels, when the text may be `width` wide, and how it is
     // painted, so the text looks like its own. `band` is all of the band;
@@ -44,7 +51,9 @@ struct HostNotebookResult
     bool known = false;
     // One entry for each page, in order: the index the page had when the
     // notebook opened, `requested` for the page opened for a request with
-    // page -1, or `added` for another page that appeared meanwhile.
+    // page -1, or `added` for another page that appeared meanwhile. No page
+    // is `requested` when the request could not take one. When the notebook
+    // was changed elsewhere, every page is `added` but the requested one.
     static constexpr int requested = -1, added = -2;
     QVector<int> pages;
 };

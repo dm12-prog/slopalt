@@ -453,11 +453,19 @@ private:
         auto *main = native.mainWindow();
         QWidget *top = main ? native.currentView(main) : nullptr;
         ++polls_;
-        if (!reader_) {
-            deleteLater();
+        // Sleep hides Nickel's pages without closing them.
+        if (NativeLifecycle::suspended())
             return;
-        }
         if (stage_ == Stage::Waiting) {
+            if (!reader_) {
+                finish("reader-gone");
+                return;
+            }
+            if (top && top != before_ && !notebook(top)) {
+                // Nickel shows another page instead.
+                finish("other-page");
+                return;
+            }
             if (top && top != before_) {
                 screen_ = top;
                 stage_ = Stage::Finding;
@@ -479,9 +487,6 @@ private:
             }
             return;
         }
-        // Sleep hides Nickel's pages without closing them.
-        if (NativeLifecycle::suspended())
-            return;
         if (!onStack(top)) {
             finish("closed");
             return;
@@ -501,6 +506,17 @@ private:
             settle();
         else if (stage_ == Stage::Following)
             follow();
+    }
+
+    // Nickel's notebook screen, or a page with its notebook editor.
+    static bool notebook(QWidget *page)
+    {
+        if (page->inherits("IInkNotePad"))
+            return true;
+        for (QWidget *widget : page->findChildren<QWidget *>())
+            if (widget->inherits("IInkNotePadWidget"))
+                return true;
+        return false;
     }
 
     static bool dialogOpen()
@@ -601,17 +617,34 @@ private:
         }
         // The editor learns its kind when it reads the notebook, in one step
         // with its pages.
-        if (!plugin_.basic(editor_))
+        if (!plugin_.basic(editor_)) {
+            if (++waits_ > 100)
+                plain("not-basic");
             return;
+        }
         // A notebook that the editor could not read shows no page. It is
         // left alone, and nothing is reported about its pages.
         if (plugin_.editorKnown && !showsPage()) {
-            if (++waits_ > 20)
+            if (++waits_ > 120)
                 plain("no-page");
             return;
         }
         waits_ = 0;
         opened_ = lastNow() + 1;
+        // Fewer pages than when the notebook last closed: pages were deleted
+        // elsewhere, in My Notebooks, so the earlier pages cannot be matched.
+        // Without the editor's layout a notebook that it could not read
+        // looks the same, and then nothing is reported.
+        if (opened_ < request_.excerpts.size()) {
+            elsewhere_ = true;
+            if (!plugin_.editorKnown)
+                reportable_ = false;
+            diagnostic("host-notebook",
+                       { { "result", "pages-changed-elsewhere" },
+                         { "pages", opened_ },
+                         { "known_pages", request_.excerpts.size() } },
+                       false);
+        }
         // A page asked for that the notebook does not have is a new page.
         fresh_ = request_.page < 0 || request_.page >= opened_;
         stage_ = Stage::Settling;
@@ -641,9 +674,13 @@ private:
                 // On the last page. If it has ink, the editor adds the empty
                 // page behind it, as it does after a stroke. Like Nickel,
                 // this waits until the editor is idle, for a moment at most.
-                if (!addPage() && ++waits_ <= 10)
+                const Add result = addPage();
+                if (result == Add::Busy && ++waits_ <= 10)
                     return;
                 grown_ = true;
+                // After the editor's own step the last page is empty: it
+                // either had no ink or is the page just added.
+                emptyLast_ = result == Add::Done;
                 continue;
             }
             settled(target);
@@ -662,9 +699,19 @@ private:
             return;
         }
         for (int i = 0; i < count; ++i)
-            pages_.append(i < opened_ ? i : platform::HostNotebookResult::added);
-        if (fresh_ && target < pages_.size())
-            pages_[target] = platform::HostNotebookResult::requested;
+            pages_.append(i < opened_ && !elsewhere_ ? i : platform::HostNotebookResult::added);
+        if (fresh_ && target < pages_.size()) {
+            // The last page is taken for the request when it is new, or when
+            // it belongs to no highlight and is empty or waits for none. A
+            // page that may hold another highlight's notes keeps them, and
+            // the request gets no page this time.
+            const bool own = pages_.at(target) == platform::HostNotebookResult::added
+                    || (!request_.lastOwned && (emptyLast_ || !request_.lastWaiting));
+            if (own)
+                pages_[target] = platform::HostNotebookResult::requested;
+            else
+                diagnostic("host-notebook", { { "result", "last-page-kept" } }, false);
+        }
         shown_ = target;
         stage_ = Stage::Following;
         diagnostic("host-notebook",
@@ -674,6 +721,7 @@ private:
                      { "opened_pages", opened_ },
                      { "asked", request_.page },
                      { "layout_known", plugin_.editorKnown },
+                     { "empty_last", emptyLast_ },
                      { "polls", polls_ } },
                    false);
         follow();
@@ -698,22 +746,26 @@ private:
         return pageNow() == page;
     }
 
+    enum class Add { Done, Busy, Unknown };
+
     // Asks the editor to do what it does after a stroke: when the page shown
-    // is the last one and has ink, it adds an empty page behind it. False
-    // while the editor is busy, when the call has to wait.
-    bool addPage()
+    // is the last one and has ink, it adds an empty page behind it. Busy
+    // while the editor is busy, when the call has to wait; Unknown when the
+    // editor could not be asked.
+    Add addPage()
     {
         const auto editor = lockEditor();
         try {
             if (!editor || !hasPage(editor.get()))
-                return true;
+                return Add::Unknown;
             if (!idle(editor.get()))
-                return false;
+                return Add::Busy;
             plugin_.contentChanged(editor_, editor);
+            return Add::Done;
         } catch (...) {
             diagnostic("host-notebook", { { "result", "add-page-failed" } }, false);
         }
-        return true;
+        return Add::Unknown;
     }
 
     // Keeps the list of pages and the text above the page current.
@@ -762,7 +814,7 @@ private:
     {
         poll_.stop();
         platform::HostNotebookResult outcome;
-        if (stage_ == Stage::Following && !pages_.isEmpty()) {
+        if (stage_ == Stage::Following && reportable_ && !pages_.isEmpty()) {
             outcome.known = true;
             outcome.pages = pages_;
         }
@@ -779,9 +831,10 @@ private:
             reader_->show();
             reader_->raise();
             reader_->activateWindow();
-            if (closed_)
-                closed_(outcome);
         }
+        // Also when the reader has gone meanwhile: the pages are still saved.
+        if (closed_)
+            closed_(outcome);
         deleteLater();
     }
 
@@ -795,7 +848,8 @@ private:
     Stage stage_ = Stage::Waiting;
     QVector<int> pages_;
     int polls_ = 0, quiet_ = 0, tries_ = 0, waits_ = 0, opened_ = 0, shown_ = -1;
-    bool asked_ = false, fresh_ = false, grown_ = false;
+    bool asked_ = false, fresh_ = false, grown_ = false, emptyLast_ = false;
+    bool elsewhere_ = false, reportable_ = true;
 };
 
 bool open(const platform::HostNotebookRequest &request, QWidget *reader,

@@ -1739,7 +1739,7 @@ bool Reader::openLinkedNotebook(QPoint bodyPoint)
     if (notebookFolder.isEmpty() || (host ? hostBook.pages.isEmpty() : notebookLinks.isEmpty()))
         return false;
     for (const auto &group : savedHighlightGroups) {
-        if (host ? hostBook.pageOf(group.first) < 0 : !notebookLinks.contains(group.first))
+        if (host ? hostBook.pageFor(group.first) < 0 : !notebookLinks.contains(group.first))
             continue;
         for (const auto &rect : group.second)
             if (rect.contains(bodyPoint)) {
@@ -1768,9 +1768,13 @@ QString excerptText(const QString &text)
     if (shown.isEmpty())
         return {};
     if (shown.size() > excerptUnits) {
-        // Cut at the last space that fits, where there is one.
+        // Cut at the last space that fits, where there is one, and never
+        // inside a character that takes two units.
         const int space = shown.lastIndexOf(QLatin1Char(' '), excerptUnits);
-        shown = shown.left(space > excerptUnits / 2 ? space : excerptUnits) + QStringLiteral("…");
+        int cut = space > excerptUnits / 2 ? space : excerptUnits;
+        if (shown.at(cut - 1).isHighSurrogate())
+            --cut;
+        shown = shown.left(cut) + QStringLiteral("…");
     }
     return QStringLiteral("“%1”").arg(shown);
 }
@@ -1855,6 +1859,8 @@ void Reader::showHostNotebook(const QString &id)
     for (const auto &owner : owners)
         request.excerpts.append(texts.value(owner));
     request.excerpt = texts.value(id);
+    request.lastOwned = !hostBook.pages.isEmpty() && !hostBook.pages.last().isEmpty();
+    request.lastWaiting = !hostBook.waiting().isEmpty();
     request.excerptHeight = [](const QString &text, int width) {
         const QRect area = excerptArea(QRect(0, 0, width, ui::px(2000)));
         const int lines = QFontMetrics(excerptFont()).boundingRect(area, excerptFlags, text).height();
@@ -1871,18 +1877,21 @@ void Reader::showHostNotebook(const QString &id)
                          QColor(150, 150, 150));
     };
     QPointer<Reader> guard(this);
+    // The pages are saved even if the reader has closed meanwhile; only this
+    // reader changes them while the notebook is open.
+    const auto folder = notebookFolder;
+    const auto old = hostBook;
     const bool opened = kobalt::platform::hostNotebooks().open(
-            request, this, [guard, id](const HostNotebookResult &result) {
-                if (!guard)
-                    return;
-                guard->hostNotebookOpening = false;
-                if (result.known && !result.pages.isEmpty()) {
+            request, this, [guard, id, folder, old](const HostNotebookResult &result) {
+                if (guard)
+                    guard->hostNotebookOpening = false;
+                // A pages.json that cannot be read is left as it is.
+                if (result.known && !result.pages.isEmpty() && !old.damaged) {
                     // Each page keeps the highlight it had. A page that
                     // opened for a highlight without belonging to one waits
                     // for it while it is the last page: the host puts an
                     // empty page behind a page once it has ink, so a page
                     // that is no longer the last one was drawn on.
-                    const auto &old = guard->hostBook;
                     kobalt::storage::notebook::HostBook book;
                     const int count = result.pages.size();
                     for (int i = 0; i < count; ++i) {
@@ -1909,8 +1918,8 @@ void Reader::showHostNotebook(const QString &id)
                     if (book.pages.contains(book.pending))
                         book.pending.clear();
                     if (book.pages != old.pages || book.pending != old.pending) {
-                        guard->hostBook = book;
-                        const auto folder = guard->notebookFolder;
+                        if (guard)
+                            guard->hostBook = book;
                         kobalt::storage::notebook::writer().post(
                                 [folder, book] {
                                     return kobalt::storage::notebook::writeHostBook(folder, book);
@@ -1918,6 +1927,8 @@ void Reader::showHostNotebook(const QString &id)
                                 {});
                     }
                 }
+                if (!guard)
+                    return;
                 guard->annotationFrame.clear();
                 guard->syncAnnotations();
                 guard->settleQuickAnnotations();

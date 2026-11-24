@@ -145,9 +145,20 @@ HostBook readHostBook(const QString &folder)
 {
     HostBook book;
     QFile file(folder + "/pages.json");
-    if (!file.open(QIODevice::ReadOnly) || file.size() > maxLinksBytes)
+    if (!file.exists())
         return book;
-    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maxLinksBytes) {
+        book.damaged = true;
+        return book;
+    }
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+    const auto object = document.object();
+    if (error.error != QJsonParseError::NoError || !document.isObject()
+        || object.value("version").toInt(1) > 1) {
+        book.damaged = true;
+        return book;
+    }
     const auto pages = object.value("pages").toArray();
     for (const auto &page : pages) {
         if (book.pages.size() >= maxPages)

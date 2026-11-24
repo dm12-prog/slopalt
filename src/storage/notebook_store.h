@@ -52,6 +52,9 @@ struct HostBook
     // ink, so the last page may still be empty: it becomes this highlight's
     // page when it is no longer the last one.
     QString pending;
+    // pages.json exists but cannot be read, or a newer format wrote it. It
+    // is then left as it is.
+    bool damaged = false;
 
     // The page of this highlight, counted from 0, or -1.
     int pageOf(const QString &highlight) const
